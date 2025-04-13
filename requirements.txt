@@ -2,7 +2,6 @@ flask==2.3.3
 line-bot-sdk==2.4.2
 openai==1.14.2
 python-dotenv==1.0.1
-Pillow==9.5.0
 pytesseract==0.3.10
+Pillow==10.2.0
 deep-translator==1.11.4
-
