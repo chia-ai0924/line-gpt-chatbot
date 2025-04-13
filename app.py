@@ -1,12 +1,14 @@
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
+from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageMessage
+
 import os
+import openai
 import requests
 from PIL import Image
-from io import BytesIO
-import openai
 import pytesseract
+from io import BytesIO
 from deep_translator import GoogleTranslator
 
 app = Flask(__name__)
@@ -19,10 +21,12 @@ openai.api_key = os.environ.get("OPENAI_API_KEY")
 def callback():
     signature = request.headers['X-Line-Signature']
     body = request.get_data(as_text=True)
+
     try:
         handler.handle(body, signature)
-    except:
+    except InvalidSignatureError:
         abort(400)
+
     return 'OK'
 
 @handler.add(MessageEvent, message=TextMessage)
@@ -44,23 +48,22 @@ def handle_text_message(event):
 
 @handler.add(MessageEvent, message=ImageMessage)
 def handle_image_message(event):
-    # 下載圖片
-    message_content = line_bot_api.get_message_content(event.message.id)
-    image_data = BytesIO(message_content.content)
+    # 取得圖片內容
+    image_content = line_bot_api.get_message_content(event.message.id)
+    image_bytes = BytesIO(image_content.content)
 
-    # 讀取圖片並進行 OCR
-    image = Image.open(image_data)
-    extracted_text = pytesseract.image_to_string(image)
+    # 開啟圖片並 OCR 辨識
+    image = Image.open(image_bytes)
+    ocr_text = pytesseract.image_to_string(image)
 
-    # 判斷是否需要翻譯（若中文字元比例太少）
-    chinese_chars = sum(1 for c in extracted_text if '\u4e00' <= c <= '\u9fff')
-    if chinese_chars < len(extracted_text) * 0.3:
-        translated_text = GoogleTranslator(source='auto', target='zh-tw').translate(extracted_text)
+    # 偵測是否非中文（簡易判斷）
+    if not any('\u4e00' <= ch <= '\u9fff' for ch in ocr_text):
+        translated_text = GoogleTranslator(source='auto', target='zh-tw').translate(ocr_text)
     else:
-        translated_text = extracted_text
+        translated_text = ocr_text
 
-    # 丟給 GPT 做說明
-    prompt = f"這是一張圖片，裡面的文字是：{translated_text}\n請幫我說明這張圖片的內容，並補充一些實用的背景知識或建議。"
+    # 生成描述性回應
+    prompt = f"這張圖片中的文字是：{translated_text}\n請幫我用一段自然的中文說明這張圖片的內容。"
     reply = openai.ChatCompletion.create(
         model="gpt-3.5-turbo",
         messages=[
@@ -77,4 +80,3 @@ def handle_image_message(event):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
-
