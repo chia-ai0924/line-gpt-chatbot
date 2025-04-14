@@ -10,7 +10,7 @@ import logging
 
 app = Flask(__name__)
 
-# 啟用 logging
+# 設定 log 輸出
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -50,7 +50,7 @@ def handle_text_message(event):
         logger.info(f"🗣️ 收到文字訊息: {user_message}")
 
         gpt_response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
+            model="gpt-4",  # ✅ 升級為 GPT-4
             messages=[{"role": "user", "content": user_message}]
         )
         reply_text = gpt_response.choices[0].message.content.strip()
@@ -97,9 +97,9 @@ def handle_image_message(event):
 
             logger.info(f"🈶 GPT 分析文字: {translated_text}")
 
-            # 呼叫 GPT 回應分析
+            # 呼叫 GPT-4 分析
             gpt_response = openai.ChatCompletion.create(
-                model="gpt-3.5-turbo",
+                model="gpt-4",  # ✅ 使用 GPT-4
                 messages=[{
                     "role": "user",
                     "content": f"這段內容是從圖片中辨識出來的文字：\n{translated_text}\n\n請幫我解釋它的意思，提供背景資訊或建議用途。"
@@ -115,3 +115,4 @@ def handle_image_message(event):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
+
