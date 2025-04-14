@@ -1,2 +1,6 @@
 flask
 gunicorn
+openai
+requests
+line-bot-sdk
+deep-translator
