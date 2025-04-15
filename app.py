@@ -3,7 +3,7 @@ from linebot import LineBotApi, WebhookHandler
 from linebot.models import MessageEvent, TextMessage, ImageMessage, TextSendMessage
 import os
 import requests
-import openai
+from openai import OpenAI
 from deep_translator import GoogleTranslator
 from langdetect import detect
 from PIL import Image
@@ -16,10 +16,9 @@ app = Flask(__name__)
 
 line_bot_api = LineBotApi(os.environ.get("LINE_CHANNEL_ACCESS_TOKEN"))
 handler = WebhookHandler(os.environ.get("LINE_CHANNEL_SECRET"))
-openai.api_key = os.environ.get("OPENAI_API_KEY")
+client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 ocr_api_key = os.environ.get("OCR_API_KEY")
 
-# 系統角色提示
 SYSTEM_PROMPT = "你是一個智慧的 LINE 助理，請用繁體中文回答使用者的問題。"
 
 @app.route("/callback", methods=['POST'])
@@ -39,7 +38,7 @@ def handle_text_message(event):
         user_message = event.message.text
         print("收到文字訊息:", user_message)
 
-        gpt_response = openai.ChatCompletion.create(
+        gpt_response = client.chat.completions.create(
             model="gpt-4",
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
@@ -82,7 +81,7 @@ def handle_image_message(event):
         parsed_text = ocr_result["ParsedResults"][0]["ParsedText"]
         print("OCR 辨識結果:", parsed_text)
 
-        # 如果有文字
+        # 有文字 → 翻譯並分析
         if parsed_text.strip():
             try:
                 lang = detect(parsed_text)
@@ -103,7 +102,7 @@ def handle_image_message(event):
 請你根據這些資訊，用繁體中文說明這張圖片的可能內容、用途、背景，並提供一些有幫助的整理與描述。"""
 
         else:
-            # 無文字時改用圖片本身讓 GPT 分析
+            # 無文字 → 啟用圖片內容分析模式
             print("圖片未偵測到文字，啟用圖像分析模式")
             base64_image = base64.b64encode(image_bytes.getvalue()).decode('utf-8')
             prompt = f"""這是一張圖片的 base64 編碼，請你幫我根據這張圖片的視覺內容進行推測與說明。
@@ -114,7 +113,7 @@ data:image/jpeg;base64,{base64_image}
 請你用繁體中文描述圖片中可能的主題、物件、用途、背景，若看起來像植物、食物、菜單或產品，也請一併推測種類與照顧／用途建議。回覆要像人一樣有條理、智慧、有幫助。"""
 
         # 呼叫 GPT 分析
-        gpt_response = openai.ChatCompletion.create(
+        gpt_response = client.chat.completions.create(
             model="gpt-4",
             messages=[
                 {"role": "system", "content": "你是一位圖片分析專家，請用繁體中文聰明地幫助使用者理解圖片中的內容與含意。"},
