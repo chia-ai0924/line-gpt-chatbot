@@ -1,63 +1,66 @@
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.models import MessageEvent, TextMessage, ImageMessage, TextSendMessage
-from deep_translator import GoogleTranslator
-from openai import OpenAI
 import os
 import requests
+import openai
+from deep_translator import GoogleTranslator
 import logging
 
+# 初始化
 app = Flask(__name__)
 
-# Logging 設定
+# 設定 log 格式
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("app")
+logger = logging.getLogger(__name__)
 
-# 初始化
+# 讀取環境變數
 line_bot_api = LineBotApi(os.environ.get("LINE_ACCESS_TOKEN"))
 handler = WebhookHandler(os.environ.get("LINE_CHANNEL_SECRET"))
-client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+openai.api_key = os.environ.get("OPENAI_API_KEY")
 ocr_api_key = os.environ.get("OCR_API_KEY")
+
+@app.route("/")
+def home():
+    return "LINE GPT Chatbot is running!"
 
 @app.route("/callback", methods=['POST'])
 def callback():
-    signature = request.headers.get("X-Line-Signature")
+    signature = request.headers['X-Line-Signature']
     body = request.get_data(as_text=True)
-    logger.info(f"收到 LINE Webhook 請求")
-    logger.info(f"Headers: {request.headers}")
-    logger.info(f"Body: {body}")
-
+    logger.info("🔔 收到 LINE Webhook 請求")
+    logger.info(f"📦 Headers: {request.headers}")
+    logger.info(f"📩 Body: {body}")
     try:
         handler.handle(body, signature)
     except Exception as e:
-        logger.exception("處理 webhook 時發生錯誤")
-        return 'Error', 400
+        logger.exception(f"❌ Webhook 處理失敗: {e}")
+        abort(400)
+    return 'OK'
 
-    return 'OK', 200
-
-# 處理文字訊息
 @handler.add(MessageEvent, message=TextMessage)
 def handle_text_message(event):
+    user_msg = event.message.text
+    logger.info(f"📨 收到文字訊息: {user_msg}")
     try:
-        user_msg = event.message.text
-        logger.info(f"收到文字訊息: {user_msg}")
-
-        response = client.chat.completions.create(
+        gpt_response = openai.ChatCompletion.create(
             model="gpt-4",
-            messages=[{"role": "user", "content": user_msg}]
+            messages=[
+                {"role": "system", "content": "你是一個聰明且有幫助的助理，所有回覆使用繁體中文。"},
+                {"role": "user", "content": user_msg}
+            ]
         )
-        reply = response.choices[0].message.content.strip()
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+        reply_text = gpt_response.choices[0].message.content.strip()
+        logger.info(f"✅ GPT 回覆成功: {reply_text}")
     except Exception as e:
-        logger.exception("回覆文字訊息時錯誤")
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="發生錯誤，請稍後再試。"))
+        logger.exception("❌ 回覆文字訊息時錯誤:")
+        reply_text = "發生錯誤，請稍後再試。"
+    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
 
-# 處理圖片訊息
 @handler.add(MessageEvent, message=ImageMessage)
 def handle_image_message(event):
+    logger.info("🖼️ 收到圖片訊息，開始處理圖片...")
     try:
-        logger.info("📥 收到圖片訊息，開始處理圖片...")
-
         # 下載圖片
         message_content = line_bot_api.get_message_content(event.message.id)
         image_path = f"/tmp/{event.message.id}.jpg"
@@ -66,57 +69,44 @@ def handle_image_message(event):
                 f.write(chunk)
         logger.info(f"✅ 圖片下載成功: {image_path}")
 
-        # OCR 辨識圖片文字
-        ocr_result = requests.post(
-            "https://api.ocr.space/parse/image",
-            data={"apikey": ocr_api_key, "language": "eng"},
-            files={"filename": open(image_path, "rb")}
-        ).json()
-        parsed_text = ocr_result['ParsedResults'][0]['ParsedText']
-        logger.info(f"🧠 OCR 辨識結果: {parsed_text}")
-
-        # 自動偵測語言 → 若非中文或英文，則翻譯成中文
-        try:
-            detected_lang = GoogleTranslator().detect(parsed_text)
-            logger.info(f"🔍 偵測語言: {detected_lang}")
-        except Exception as e:
-            detected_lang = "unknown"
-            logger.warning(f"翻譯時發生錯誤: {e}")
-
-        # 若非中文或英文，進行翻譯
-        if detected_lang not in ["zh-CN", "zh-TW", "en"]:
-            try:
-                translated_text = GoogleTranslator(source='auto', target='zh-TW').translate(parsed_text)
-                logger.info(f"🌐 翻譯成中文: {translated_text}")
-            except Exception as e:
-                translated_text = None
-                logger.warning(f"⚠️ 翻譯失敗: {e}")
-        else:
-            translated_text = parsed_text
-
-        # 使用 GPT 分析並生成說明
-        try:
-            content_to_ask = translated_text if translated_text else parsed_text
-            gpt_response = client.chat.completions.create(
-                model="gpt-4",
-                messages=[{
-                    "role": "system",
-                    "content": "你是一個智慧助理，請根據圖片辨識文字給予有幫助的解說。"
-                }, {
-                    "role": "user",
-                    "content": f"以下是圖片中擷取的文字內容：\n{content_to_ask}"
-                }]
+        # 使用 OCR.Space 進行文字辨識
+        with open(image_path, 'rb') as image_file:
+            response = requests.post(
+                "https://api.ocr.space/parse/image",
+                files={"file": image_file},
+                data={"apikey": ocr_api_key, "language": "eng"},
             )
-            reply = gpt_response.choices[0].message.content.strip()
+        result = response.json()
+        parsed_text = result["ParsedResults"][0]["ParsedText"].strip()
+        logger.info(f"📖 OCR 辨識結果: {parsed_text}")
+
+        # 判斷語言，若非中文則翻譯成繁體中文
+        try:
+            translated_text = GoogleTranslator(source='auto', target='zh-TW').translate(parsed_text)
+            logger.info(f"🌐 翻譯後文字（繁體中文）: {translated_text}")
         except Exception as e:
-            logger.exception("GPT 回應失敗")
-            reply = f"辨識成功，但翻譯或 GPT 回覆過程發生錯誤。\n原始文字：\n{parsed_text}"
+            logger.warning(f"⚠️ 翻譯時發生錯誤: {e}")
+            translated_text = f"辨識成功，但翻譯過程發生錯誤。原始文字：\n{parsed_text}"
 
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+        # 送到 GPT 分析
+        try:
+            gpt_response = openai.ChatCompletion.create(
+                model="gpt-4",
+                messages=[
+                    {"role": "system", "content": "你是一個能解釋圖片中資訊的助手，請以繁體中文回覆使用者的問題。"},
+                    {"role": "user", "content": f"這是圖片內的內容：\n{translated_text}\n請告訴我這是什麼，以及可能的用途或建議。"}
+                ]
+            )
+            final_reply = gpt_response.choices[0].message.content.strip()
+        except Exception as e:
+            logger.exception("❌ GPT 圖片分析時發生錯誤:")
+            final_reply = f"圖片內容為：\n{translated_text}"
 
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=final_reply))
     except Exception as e:
-        logger.exception("處理圖片時發生錯誤")
+        logger.exception("❌ 處理圖片時發生錯誤:")
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text="處理圖片時發生錯誤，請稍後再試。"))
 
+# Flask 啟動設定（Render 用 gunicorn 執行）
 if __name__ == "__main__":
     app.run()
