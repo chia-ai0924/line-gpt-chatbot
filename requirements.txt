@@ -1,6 +1,6 @@
 flask
 gunicorn
-openai
+openai>=1.0.0
 requests
 line-bot-sdk
 deep-translator
