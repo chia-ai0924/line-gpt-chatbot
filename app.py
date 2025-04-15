@@ -66,13 +66,13 @@ def handle_image_message(event):
         image_bytes = BytesIO()
         for chunk in image_content.iter_content():
             image_bytes.write(chunk)
-        image_data = image_bytes.getvalue()
+        image_bytes.seek(0)  # 重設指標以便後續使用
         print("圖片下載成功")
 
-        # 上傳至 OCR.Space
+        # 上傳至 OCR.Space（已修正格式）
         ocr_response = requests.post(
             "https://api.ocr.space/parse/image",
-            files={"filename": image_data},
+            files={"filename": ("image.jpg", image_bytes, "image/jpeg")},
             data={"language": "eng", "apikey": ocr_api_key},
         )
 
@@ -125,4 +125,3 @@ def handle_image_message(event):
 
 if __name__ == "__main__":
     app.run()
-
