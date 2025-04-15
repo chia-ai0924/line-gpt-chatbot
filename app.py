@@ -10,6 +10,7 @@ from PIL import Image
 from io import BytesIO
 import base64
 import logging
+import traceback
 
 app = Flask(__name__)
 
@@ -53,6 +54,7 @@ def handle_text_message(event):
         )
     except Exception as e:
         print("回覆文字訊息時發生錯誤:", e)
+        traceback.print_exc()
         line_bot_api.reply_message(
             event.reply_token,
             TextSendMessage(text="發生錯誤，請稍後再試。")
@@ -66,10 +68,10 @@ def handle_image_message(event):
         image_bytes = BytesIO()
         for chunk in image_content.iter_content():
             image_bytes.write(chunk)
-        image_bytes.seek(0)  # 重設指標以便後續使用
+        image_bytes.seek(0)
         print("圖片下載成功")
 
-        # 上傳至 OCR.Space（已修正格式）
+        # 上傳至 OCR.Space
         ocr_response = requests.post(
             "https://api.ocr.space/parse/image",
             files={"filename": ("image.jpg", image_bytes, "image/jpeg")},
@@ -94,7 +96,7 @@ def handle_image_message(event):
                 translated = parsed_text
         except Exception as e:
             print("翻譯時發生錯誤:", e)
-            translated = parsed_text  # fallback 使用原文
+            translated = parsed_text
 
         # 使用 GPT 分析圖片內容
         prompt = f"""以下是從圖片中辨識出的文字內容：
@@ -118,6 +120,8 @@ def handle_image_message(event):
         )
     except Exception as e:
         logging.exception("圖片處理錯誤")
+        print("詳細錯誤資訊如下：")
+        traceback.print_exc()
         line_bot_api.reply_message(
             event.reply_token,
             TextSendMessage(text="處理圖片時發生錯誤，請稍後再試。")
