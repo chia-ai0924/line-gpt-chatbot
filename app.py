@@ -19,7 +19,7 @@ handler = WebhookHandler(os.environ.get("LINE_CHANNEL_SECRET"))
 openai.api_key = os.environ.get("OPENAI_API_KEY")
 ocr_api_key = os.environ.get("OCR_API_KEY")
 
-# 繁體中文系統提示（未來如要調整角色可修改）
+# 系統角色提示
 SYSTEM_PROMPT = "你是一個智慧的 LINE 助理，請用繁體中文回答使用者的問題。"
 
 @app.route("/callback", methods=['POST'])
@@ -71,7 +71,7 @@ def handle_image_message(event):
         image_bytes.seek(0)
         print("圖片下載成功")
 
-        # 上傳至 OCR.Space
+        # 嘗試 OCR
         ocr_response = requests.post(
             "https://api.ocr.space/parse/image",
             files={"filename": ("image.jpg", image_bytes, "image/jpeg")},
@@ -82,33 +82,42 @@ def handle_image_message(event):
         parsed_text = ocr_result["ParsedResults"][0]["ParsedText"]
         print("OCR 辨識結果:", parsed_text)
 
-        if not parsed_text.strip():
-            raise ValueError("圖片中未偵測到文字")
-
-        # 偵測語言與翻譯（若非中文）
-        try:
-            lang = detect(parsed_text)
-            print("語言偵測結果:", lang)
-            if lang not in ["zh-cn", "zh-tw", "zh"]:
-                translated = GoogleTranslator(source='auto', target='zh-TW').translate(parsed_text)
-                print("翻譯後文字:", translated)
-            else:
+        # 如果有文字
+        if parsed_text.strip():
+            try:
+                lang = detect(parsed_text)
+                print("語言偵測結果:", lang)
+                if lang not in ["zh-cn", "zh-tw", "zh"]:
+                    translated = GoogleTranslator(source='auto', target='zh-TW').translate(parsed_text)
+                    print("翻譯後文字:", translated)
+                else:
+                    translated = parsed_text
+            except Exception as e:
+                print("翻譯時發生錯誤:", e)
                 translated = parsed_text
-        except Exception as e:
-            print("翻譯時發生錯誤:", e)
-            translated = parsed_text
 
-        # 使用 GPT 分析圖片內容
-        prompt = f"""以下是從圖片中辨識出的文字內容：
+            prompt = f"""以下是從圖片中辨識出的文字內容：
 
 {translated}
 
 請你根據這些資訊，用繁體中文說明這張圖片的可能內容、用途、背景，並提供一些有幫助的整理與描述。"""
 
+        else:
+            # 無文字時改用圖片本身讓 GPT 分析
+            print("圖片未偵測到文字，啟用圖像分析模式")
+            base64_image = base64.b64encode(image_bytes.getvalue()).decode('utf-8')
+            prompt = f"""這是一張圖片的 base64 編碼，請你幫我根據這張圖片的視覺內容進行推測與說明。
+
+圖片 base64：
+data:image/jpeg;base64,{base64_image}
+
+請你用繁體中文描述圖片中可能的主題、物件、用途、背景，若看起來像植物、食物、菜單或產品，也請一併推測種類與照顧／用途建議。回覆要像人一樣有條理、智慧、有幫助。"""
+
+        # 呼叫 GPT 分析
         gpt_response = openai.ChatCompletion.create(
             model="gpt-4",
             messages=[
-                {"role": "system", "content": "你是一位圖片分析專家，請用繁體中文聰明地幫助使用者理解圖片中的文字內容與含意。"},
+                {"role": "system", "content": "你是一位圖片分析專家，請用繁體中文聰明地幫助使用者理解圖片中的內容與含意。"},
                 {"role": "user", "content": prompt}
             ]
         )
@@ -118,6 +127,7 @@ def handle_image_message(event):
             event.reply_token,
             TextSendMessage(text=reply_text)
         )
+
     except Exception as e:
         logging.exception("圖片處理錯誤")
         print("詳細錯誤資訊如下：")
