@@ -91,7 +91,7 @@ def handle_image_message(event):
         prompt = f"這是使用者提供的圖片內容，請用繁體中文分析其含意，若圖片中有文字為主，請加以整理翻譯，若是圖像為主，請說明圖像內容:"
 
 {parsed_text}
-圖片網址：{image_url}"
+圖片網址:{image_url}"
 
         gpt_response = openai.chat.completions.create(
             model="gpt-4-vision-preview",
