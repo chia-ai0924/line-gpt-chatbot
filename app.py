@@ -1,116 +1,112 @@
 import os
 import uuid
-import shutil
-import logging
-from flask import Flask, request, abort, send_from_directory
-from linebot import LineBotApi, WebhookHandler
-from linebot.models import MessageEvent, TextMessage, ImageMessage, TextSendMessage
-from openai import OpenAI
-from PIL import Image
-import pytesseract
 import requests
+import shutil
 import threading
-from langdetect import detect
-from deep_translator import GoogleTranslator
+from flask import Flask, request, send_from_directory, abort
+from linebot import LineBotApi, WebhookHandler
+from linebot.exceptions import InvalidSignatureError
+from linebot.models import MessageEvent, TextMessage, ImageMessage, TextSendMessage
+from PIL import Image
+from openai import OpenAI
+import time
 
-# 初始化
-app = Flask(__name__, static_url_path='/image', static_folder='static/images')
-client = OpenAI()
-logging.basicConfig(level=logging.INFO)
+# 初始化 Flask 應用與 LINE、OpenAI 客戶端
+app = Flask(__name__, static_url_path="/static", static_folder="static")
 
-# 設定你的環境變數
 line_bot_api = LineBotApi(os.environ.get("LINE_ACCESS_TOKEN"))
 handler = WebhookHandler(os.environ.get("LINE_SECRET"))
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
+client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+OCR_API_KEY = os.environ.get("OCR_API_KEY")
+STATIC_IMAGE_DIR = "./static/images"
 
-# 確保 static/images 資料夾存在
-os.makedirs("static/images", exist_ok=True)
+# 確保圖片資料夾存在
+os.makedirs(STATIC_IMAGE_DIR, exist_ok=True)
 
-def remove_file_later(filepath, delay=180):
+# 自動刪除圖片
+def delete_file_later(path, delay=180):
     def delete():
-        import time
         time.sleep(delay)
         try:
-            os.remove(filepath)
-        except Exception as e:
-            logging.warning(f"刪除圖片失敗：{e}")
+            os.remove(path)
+        except:
+            pass
     threading.Thread(target=delete).start()
 
-def generate_token():
-    import secrets
-    return secrets.token_hex(8)
+# 圖片路由，加入驗證 token
+@app.route("/image/<filename>")
+def serve_image(filename):
+    token = request.args.get("auth")
+    if not token or token != filename.split(".")[0][-12:]:
+        abort(403)
+    return send_from_directory(STATIC_IMAGE_DIR, filename)
 
-@app.route("/callback", methods=['POST'])
+# 主 webhook 處理
+@app.route("/callback", methods=["POST"])
 def callback():
-    signature = request.headers['X-Line-Signature']
+    signature = request.headers["X-Line-Signature"]
     body = request.get_data(as_text=True)
     try:
         handler.handle(body, signature)
-    except Exception as e:
-        logging.error(f"LINE 處理失敗: {e}")
+    except InvalidSignatureError:
         abort(400)
-    return 'OK'
+    return "OK"
 
 @handler.add(MessageEvent, message=ImageMessage)
 def handle_image_message(event):
     try:
-        message_id = event.message.id
-        ext = "jpg"
-        token = generate_token()
-        filename = f"{uuid.uuid4()}.{ext}"
-        filepath = os.path.join("static/images", filename)
-
         # 儲存圖片
-        content = line_bot_api.get_message_content(message_id)
+        message_id = event.message.id
+        image_content = line_bot_api.get_message_content(message_id)
+        filename = f"{uuid.uuid4()}.jpg"
+        filepath = os.path.join(STATIC_IMAGE_DIR, filename)
         with open(filepath, "wb") as f:
-            for chunk in content.iter_content():
-                f.write(chunk)
-        logging.info("圖片下載成功")
+            shutil.copyfileobj(image_content.content, f)
 
-        # OCR 辨識
-        image = Image.open(filepath)
-        ocr_text = pytesseract.image_to_string(image, lang="eng+chi_tra").strip()
-        logging.info(f"OCR 辨識結果: {ocr_text}")
+        delete_file_later(filepath)  # 自動刪除
 
-        if ocr_text:
-            lang = detect(ocr_text)
-            if lang != "zh-tw":
-                translated = GoogleTranslator(source='auto', target='zh-tw').translate(ocr_text)
-            else:
-                translated = ocr_text
-            prompt = f"這張圖片中的文字內容是：{translated}。請根據這些文字給我一段有幫助的說明。"
-        else:
-            prompt = f"這是一張圖片，請你根據圖片內容進行分析與說明。若為菜單請翻譯、若為表格請整理。圖片網址為：https://line-gpt-chatbot-fiv0.onrender.com/image/{filename}?auth={token}"
-
-        # GPT Vision 處理
-        with open(filepath, "rb") as f:
-            gpt_response = client.chat.completions.create(
-                model="gpt-4-turbo",
-                messages=[
-                    {"role": "user", "content": [
-                        {"type": "text", "text": prompt},
-                        {"type": "image_url", "image_url": {
-                            "url": f"https://line-gpt-chatbot-fiv0.onrender.com/image/{filename}?auth={token}"
-                        }}
-                    ]}
-                ],
-                max_tokens=1000
+        # 上傳至 OCR.Space 辨識
+        with open(filepath, "rb") as image_file:
+            ocr_response = requests.post(
+                "https://api.ocr.space/parse/image",
+                files={"file": image_file},
+                data={"language": "cht", "isOverlayRequired": False},
+                headers={"apikey": OCR_API_KEY}
             )
-        final_reply = gpt_response.choices[0].message.content.strip()
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=final_reply))
+        ocr_result = ocr_response.json()
+        parsed_text = ocr_result["ParsedResults"][0]["ParsedText"].strip() if "ParsedResults" in ocr_result else ""
 
-        # 三分鐘後自動刪除
-        remove_file_later(filepath)
+        # 建立圖片網址給 GPT 分析
+        token = filename.split(".")[0][-12:]
+        image_url = f"https://{request.host}/image/{filename}?auth={token}"
 
-        # 儲存 token 驗證（簡化版，實作中未查驗 token，有需要再加強）
+        # 整合 GPT Vision
+        prompt = f"這是使用者提供的圖片內容，請用繁體中文分析其含意，若圖片中有文字為主，請加以整理翻譯，若是圖像為主，請說明圖像內容：
+
+可參考圖片網址：{image_url}"
+        messages = [{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": image_url}}]}]
+        gpt_response = client.chat.completions.create(model="gpt-4-vision-preview", messages=messages, max_tokens=1000)
+        reply_text = gpt_response.choices[0].message.content.strip()
+
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
     except Exception as e:
-        logging.error("圖片處理錯誤", exc_info=True)
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="圖片處理時發生錯誤，請稍後再試。"))
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="圖片處理錯誤，請稍後再試。"))
+        print("ERROR:root:圖片處理錯誤\n", e)
 
-@app.route("/")
-def home():
-    return "Line GPT Bot is running."
+@handler.add(MessageEvent, message=TextMessage)
+def handle_text_message(event):
+    try:
+        user_message = event.message.text
+        response = client.chat.completions.create(
+            model="gpt-4",
+            messages=[{"role": "user", "content": user_message}],
+            max_tokens=1000
+        )
+        reply_text = response.choices[0].message.content.strip()
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
+    except Exception as e:
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="處理訊息時發生錯誤"))
+        print("ERROR:root:訊息處理錯誤\n", e)
 
 if __name__ == "__main__":
     app.run()
