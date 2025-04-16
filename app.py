@@ -1,3 +1,5 @@
+# ✅ 完整 app.py（加入 token 檢查、3 分鐘刪除、修正圖片寫入與下載問題）
+
 import os
 import uuid
 import threading
@@ -22,7 +24,6 @@ client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 ocr_api_key = os.environ.get("OCR_API_KEY")
 SYSTEM_PROMPT = "你是一個智慧的 LINE 助理，請用繁體中文回答使用者的問題。"
 
-# 儲存圖片對應的 token
 image_auth_map = {}
 
 def delete_file_and_token(image_id, delay=180):
@@ -55,19 +56,20 @@ def callback():
 def serve_image(image_id):
     token = request.args.get("auth")
     expected_token = image_auth_map.get(image_id)
+    filepath = f"/tmp/{image_id}.jpg"
     if not expected_token or token != expected_token:
         return "拒絕存取：token 錯誤或圖片已過期", 403
-    filepath = f"/tmp/{image_id}.jpg"
     if os.path.exists(filepath):
+        if os.path.getsize(filepath) == 0:
+            return "圖片檔案異常，無法下載", 500
         return send_file(filepath, mimetype="image/jpeg", as_attachment=False)
     else:
         return "圖片不存在或已刪除", 404
+
 @handler.add(MessageEvent, message=TextMessage)
 def handle_text_message(event):
     try:
         user_message = event.message.text
-        print("收到文字訊息:", user_message)
-
         gpt_response = client.chat.completions.create(
             model="gpt-4-turbo",
             messages=[
@@ -75,45 +77,35 @@ def handle_text_message(event):
                 {"role": "user", "content": user_message}
             ]
         )
-
         reply_text = gpt_response.choices[0].message.content.strip()
-        line_bot_api.reply_message(
-            event.reply_token,
-            TextSendMessage(text=reply_text)
-        )
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
     except Exception as e:
-        print("回覆文字訊息時發生錯誤:", e)
         traceback.print_exc()
-        line_bot_api.reply_message(
-            event.reply_token,
-            TextSendMessage(text="發生錯誤，請稍後再試。")
-        )
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="發生錯誤，請稍後再試。"))
 
 @handler.add(MessageEvent, message=ImageMessage)
 def handle_image_message(event):
     try:
-        # 下載圖片
         image_content = line_bot_api.get_message_content(event.message.id)
         image_bytes = BytesIO()
         for chunk in image_content.iter_content():
             image_bytes.write(chunk)
         image_bytes.seek(0)
 
-        # 產生 uuid 與 token
         image_id = str(uuid.uuid4())
-        image_path = f"/tmp/{image_id}.jpg"
         token = hashlib.sha256(image_id.encode()).hexdigest()[:16]
         image_auth_map[image_id] = token
+        image_path = f"/tmp/{image_id}.jpg"
 
-        # 儲存圖片並啟動刪除計時器
+        # ✅ 確保圖片正確寫入
         with open(image_path, "wb") as f:
             f.write(image_bytes.getvalue())
-        delete_file_and_token(image_id, delay=180)
 
-        # 生成 GPT 專用 image_url（含 token）
+        delete_file_and_token(image_id, delay=180)
         image_url = f"{request.host_url}image/{image_id}.jpg?auth={token}"
 
-        # OCR 辨識
+        # OCR 前再次重設位置
+        image_bytes.seek(0)
         ocr_response = requests.post(
             "https://api.ocr.space/parse/image",
             files={"filename": ("image.jpg", image_bytes, "image/jpeg")},
@@ -121,7 +113,6 @@ def handle_image_message(event):
         )
         ocr_result = ocr_response.json()
         parsed_text = ocr_result["ParsedResults"][0]["ParsedText"]
-        print("OCR 辨識結果:", parsed_text)
 
         if parsed_text.strip():
             try:
@@ -162,18 +153,10 @@ def handle_image_message(event):
         )
 
         reply_text = gpt_response.choices[0].message.content.strip()
-        line_bot_api.reply_message(
-            event.reply_token,
-            TextSendMessage(text=reply_text)
-        )
-
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
     except Exception as e:
         logging.exception("圖片處理錯誤")
-        line_bot_api.reply_message(
-            event.reply_token,
-            TextSendMessage(text="處理圖片時發生錯誤，請稍後再試。")
-        )
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="處理圖片時發生錯誤，請稍後再試。"))
 
 if __name__ == "__main__":
     app.run()
-
