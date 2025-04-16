@@ -2,6 +2,7 @@ import os
 import uuid
 import threading
 import time
+import hashlib
 from flask import Flask, request, abort, send_file
 from linebot import LineBotApi, WebhookHandler
 from linebot.models import MessageEvent, TextMessage, ImageMessage, TextSendMessage
@@ -21,15 +22,22 @@ client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 ocr_api_key = os.environ.get("OCR_API_KEY")
 SYSTEM_PROMPT = "你是一個智慧的 LINE 助理，請用繁體中文回答使用者的問題。"
 
-def delete_file_after_delay(filepath, delay=180):
+# 儲存圖片對應的 token
+image_auth_map = {}
+
+def delete_file_and_token(image_id, delay=180):
     def delete_later():
         time.sleep(delay)
+        image_path = f"/tmp/{image_id}.jpg"
         try:
-            if os.path.exists(filepath):
-                os.remove(filepath)
-                print(f"✅ 已自動刪除圖片：{filepath}")
+            if os.path.exists(image_path):
+                os.remove(image_path)
+                print(f"✅ 圖片已刪除：{image_path}")
+            if image_id in image_auth_map:
+                del image_auth_map[image_id]
+                print(f"✅ Token 已刪除：{image_id}")
         except Exception as e:
-            print(f"❌ 刪除圖片失敗：{e}")
+            print(f"❌ 刪除圖片或 token 失敗：{e}")
     threading.Thread(target=delete_later).start()
 
 @app.route("/callback", methods=['POST'])
@@ -43,11 +51,15 @@ def callback():
         abort(400)
     return 'OK'
 
-@app.route("/image/<image_id>")
+@app.route("/image/<image_id>.jpg")
 def serve_image(image_id):
+    token = request.args.get("auth")
+    expected_token = image_auth_map.get(image_id)
+    if not expected_token or token != expected_token:
+        return "拒絕存取：token 錯誤或圖片已過期", 403
     filepath = f"/tmp/{image_id}.jpg"
     if os.path.exists(filepath):
-        return send_file(filepath, mimetype="image/jpeg")
+        return send_file(filepath, mimetype="image/jpeg", as_attachment=False)
     else:
         return "圖片不存在或已刪除", 404
 @handler.add(MessageEvent, message=TextMessage)
@@ -57,7 +69,7 @@ def handle_text_message(event):
         print("收到文字訊息:", user_message)
 
         gpt_response = client.chat.completions.create(
-            model="gpt-4",
+            model="gpt-4-turbo",
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_message}
@@ -80,23 +92,28 @@ def handle_text_message(event):
 @handler.add(MessageEvent, message=ImageMessage)
 def handle_image_message(event):
     try:
-        # 下載圖片並儲存到本機 /tmp
+        # 下載圖片
         image_content = line_bot_api.get_message_content(event.message.id)
         image_bytes = BytesIO()
         for chunk in image_content.iter_content():
             image_bytes.write(chunk)
         image_bytes.seek(0)
 
+        # 產生 uuid 與 token
         image_id = str(uuid.uuid4())
         image_path = f"/tmp/{image_id}.jpg"
+        token = hashlib.sha256(image_id.encode()).hexdigest()[:16]
+        image_auth_map[image_id] = token
+
+        # 儲存圖片並啟動刪除計時器
         with open(image_path, "wb") as f:
             f.write(image_bytes.getvalue())
+        delete_file_and_token(image_id, delay=180)
 
-        # 啟動刪除倒數（3分鐘）
-        delete_file_after_delay(image_path, delay=180)
-        image_url = f"{request.host_url}image/{image_id}"
+        # 生成 GPT 專用 image_url（含 token）
+        image_url = f"{request.host_url}image/{image_id}.jpg?auth={token}"
 
-        # 嘗試 OCR
+        # OCR 辨識
         ocr_response = requests.post(
             "https://api.ocr.space/parse/image",
             files={"filename": ("image.jpg", image_bytes, "image/jpeg")},
@@ -106,14 +123,11 @@ def handle_image_message(event):
         parsed_text = ocr_result["ParsedResults"][0]["ParsedText"]
         print("OCR 辨識結果:", parsed_text)
 
-        # 根據是否有文字決定 GPT 提示
         if parsed_text.strip():
             try:
                 lang = detect(parsed_text)
-                print("語言偵測結果:", lang)
                 if lang not in ["zh-cn", "zh-tw", "zh"]:
                     translated = GoogleTranslator(source='auto', target='zh-TW').translate(parsed_text)
-                    print("翻譯後文字:", translated)
                 else:
                     translated = parsed_text
             except:
@@ -124,6 +138,7 @@ def handle_image_message(event):
 {translated}
 
 請你根據這些資訊，用繁體中文說明這張圖片的可能內容、用途、背景，並提供一些有幫助的整理與描述。"""
+
             gpt_messages = [
                 {"role": "system", "content": "你是一位圖片分析專家，請用繁體中文幫助使用者理解圖片中的內容與含意。"},
                 {"role": "user", "content": prompt}
@@ -140,7 +155,6 @@ def handle_image_message(event):
                 }
             ]
 
-        # 呼叫 GPT Vision 模型
         gpt_response = client.chat.completions.create(
             model="gpt-4-turbo",
             messages=gpt_messages,
@@ -162,3 +176,4 @@ def handle_image_message(event):
 
 if __name__ == "__main__":
     app.run()
+
