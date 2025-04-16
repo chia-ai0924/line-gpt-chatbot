@@ -142,7 +142,7 @@ def handle_image_message(event):
 
         # 呼叫 GPT Vision 模型
         gpt_response = client.chat.completions.create(
-            model="gpt-4-vision-preview",
+            model="gpt-4-turbo",
             messages=gpt_messages,
             max_tokens=1024
         )
