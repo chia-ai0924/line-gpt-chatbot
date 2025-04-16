@@ -1,4 +1,4 @@
-# ✅ 完整 app.py（加入 token 檢查、3 分鐘刪除、修正圖片寫入與下載問題）
+# ✅ GPT 圖片分析安全強化版 app.py（加入寫入 flush + os.fsync，並延遲 GPT 呼叫）
 
 import os
 import uuid
@@ -97,9 +97,10 @@ def handle_image_message(event):
         image_auth_map[image_id] = token
         image_path = f"/tmp/{image_id}.jpg"
 
-        # ✅ 確保圖片正確寫入
         with open(image_path, "wb") as f:
             f.write(image_bytes.getvalue())
+            f.flush()
+            os.fsync(f.fileno())  # ✅ 確保寫入硬碟完成
 
         delete_file_and_token(image_id, delay=180)
         image_url = f"{request.host_url}image/{image_id}.jpg?auth={token}"
@@ -135,6 +136,7 @@ def handle_image_message(event):
                 {"role": "user", "content": prompt}
             ]
         else:
+            time.sleep(1)  # ✅ 等待 1 秒讓圖片可穩定被 GPT 存取
             gpt_messages = [
                 {"role": "system", "content": "你是一位圖片分析專家，請用繁體中文幫助使用者理解圖片中的內容與含意。"},
                 {
